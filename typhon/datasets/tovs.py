@@ -10,6 +10,11 @@ accept such a dependency.
 # Uncertainty in Climate Data Records from Earth Observations (FIDUCEO)”.
 # Grant agreement: 638822
 # 
+# Any commits made to this module between 2017-07-01 and 2017-08-31
+# by Jonathan Mittaz are developed for the EC project “Fidelity and
+# Uncertainty in Climate Data Records from Earth Observations (FIDUCEO)”.
+# Grant agreement: 638822
+# 
 # All those contributions are dual-licensed under the MIT license for use
 # in typhon, and the GNU General Public License version 3.
 
@@ -186,7 +191,10 @@ class HIRS(dataset.MultiSatelliteDataset, Radiometer, dataset.MultiFileDataset):
     _data_vars_props = None
 
     max_valid_time_ptp = numpy.timedelta64(3, 'h')
-    filter_calibcounts = filter_prttemps = filters.MEDMAD(10)
+    filter_calibcounts = filters.MEDMAD(10,calibration_data=True,hirs=True)
+    filter_earthcounts = filters.MEDMAD(10,hirs=True,calibration_data=False)
+    filter_prttemps = filters.MEDMAD(10,prt=True,hirs=True,\
+                                         calibration_data=False)
     flag_fields = set()
     
     def __init__(self, *args, **kwargs):
@@ -202,7 +210,8 @@ class HIRS(dataset.MultiSatelliteDataset, Radiometer, dataset.MultiFileDataset):
             filters.TimeMaskFilter(self),
             filters.HIRSTimeSequenceDuplicateFilter(),
             filters.HIRSFlagger(self, max_flagged=0.5),
-            filters.HIRSCalibCountFilter(self, self.filter_calibcounts),
+            filters.HIRSCountFilter(self, self.filter_calibcounts, \
+                                        self.filter_earthcounts),
             filters.HIRSPRTTempFilter(self, self.filter_prttemps),
             )
         if self.satname is not None:
@@ -1031,8 +1040,13 @@ class HIRSPOD(HIRS):
         )
 
         # FIXME: minor frame quality, POD User's Guide, page 4-10
+        # JMittaz extra comments
+        # While 0xcffffe00 checks the scan type, for earth view this is
+        # zero so this also filters out calibration lines
         bad_bt = (lines["hrs_qualind"] & 0xcffffe00) != 0
+        # This gets the scantype which for earth data should be zero
         earthcounts = lines["hrs_qualind"] & 0x03000000 == 0
+        # All scan lines not earth view are calibration views
         calibcounts = ~earthcounts
         # treat earth and calib counts separately; a stuck mirror is not a
         # problem in calibration mode, and some mirror repositioning etc.
@@ -1295,6 +1309,17 @@ class HIRSKLM(ATOVS, HIRS):
         # FIXME: This should be rewritten to use
         # _tovs_defs.QualIndFlagsHIRSKLM and its children
 
+        # JMittaz
+        # Currently the flags defined below do not seem to be used. This has 
+        # been changed to matcvh the flags used in the NWP SAF AAPP code
+        # which are
+        #
+        #     time sequence error
+        #     no earth data
+        #     don't use
+        #
+        # 01/07/2019
+
         # quality indicators
         qi = lines["hrs_qualind"]
         qidonotuse =    qi & (1<<31)
@@ -1369,6 +1394,19 @@ class HIRSKLM(ATOVS, HIRS):
             # ...but normally still leave lat/lon/time intact...
 
             lines[fld].mask |= qidonotuse.reshape(([lines.shape[0]] +
+                    [1]*(lines[fld].ndim-1)))!=0
+
+            # JMittaz 01/07/2019
+            # Added in extra flag checking to remove bad data
+            # 
+            # time sequence error
+            # no earth location
+            # anomoly with calibration
+            lines[fld].mask |= timeseqerr.reshape(([lines.shape[0]] +
+                    [1]*(lines[fld].ndim-1)))!=0
+            lines[fld].mask |= noearthloc.reshape(([lines.shape[0]] +
+                    [1]*(lines[fld].ndim-1)))!=0
+            lines[fld].mask |= nofullcalib.reshape(([lines.shape[0]] +
                     [1]*(lines[fld].ndim-1)))!=0
 
         # If time is no longer sequential we still mask it.   Caller might
