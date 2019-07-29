@@ -7,6 +7,11 @@
 # Uncertainty in Climate Data Records from Earth Observations (FIDUCEO)”.
 # Grant agreement: 638822
 # 
+# Any commits made to this module between 2019-07-01 and 2019-08-01
+# by Jonathan Mittaz are developed for the EC project “Fidelity and
+# Uncertainty in Climate Data Records from Earth Observations (FIDUCEO)”.
+# Grant agreement: 638822
+# 
 # All those contributions are dual-licensed under the MIT license for use
 # in typhon, and the GNU General Public License version 3.
 
@@ -37,44 +42,161 @@ class FilterError(Exception):
 class OutlierFilter(metaclass=abc.ABCMeta):
     
     @abc.abstractmethod
-    def filter_outliers(self, C):
+    def filter_outliers(self, C, calibration_data=False):
         ...
 
 class MEDMAD(OutlierFilter):
     """Outlier filter based on Median Absolute Deviation
 
     """
-
-    def __init__(self, cutoff, fallback_min_std=0.1):
+    #
+    # Note there are some HIRS specific things (counts filtering) and
+    # specific calibration_data line checking (filter bad data on a 
+    # calibration line from a mean value) similar to AVHRR outlier
+    # rejection
+    #
+    def __init__(self, cutoff, fallback_min_std=0.1, hirs=False, \
+                     calibration_data=False, prt=False):
         self.cutoff = cutoff
         self.fallback_min_std = 0.1
+        self.hirs=hirs
+        self.calibration_data=calibration_data
+        self.prt=prt
     
     def filter_outliers(self, C):
-        cutoff = self.cutoff
-        if C.ndim == 3:
-            med = numpy.ma.median(
-                C.reshape(C.shape[0]*C.shape[1], C.shape[2]),
-                0)
-            mad = numpy.ma.median(
-                abs(C - med).reshape(C.shape[0]*C.shape[1], C.shape[2]),
-                0)
-            if (mad==0).any():
-                # use fallback
-                med[mad==0] = C[..., mad==0].reshape(C.shape[0]*C.shape[1], (mad==0).sum()).mean(0)
-                mad[mad==0] = numpy.c_[
-                    C[..., mad==0].reshape(C.shape[0]*C.shape[1], (mad==0).sum()).std(0),
-                    numpy.tile(self.fallback_min_std, (mad==0).sum())].max(1)
-        elif C.ndim < 3:
-            med = numpy.ma.median(C.reshape((-1,)))
-            mad = numpy.ma.median(abs(C - med).reshape((-1,)))
-            if mad==0:
-                med = C.mean()
-                mad = max(C.std(), self.fallback_min_std)
+        # FOR HIRS DATA ONLY
+        #
+        # Remove obviously bad pixels which seem to have a value of
+        # 32767 for the counts
+        # E.g. one line of space counts gives
+        #
+        # 32767, 32767, 32767, 32767, 32767, 32767, 32767, 32767, 32767, 32767, 
+        # 32767, 32767, -1523, -1523, -1524, -1524, -1522, -1523, -1522, -1522, 
+        # -1525, -1523, -1522, -1521, -1521, -1522, -1522, -1524, -1521, -1522, 
+        # -1522, -1524, -1523, -1525, -1525, -1521, -1522, -1521, -1523, -1524, 
+        #-1523, -1524, -1521, -1523, -1524, -1524, -1523, -1521, -1523
+        #
+        # where 32767 is clearly 'bad' data. Only use for integer (counts) data
+        #
+        # According to KLM guide counts should only be between -4096,4096
+        #
+        # Note have to make output for other cases as well (all good)
+        if self.hirs:
+            if C.dtype == numpy.int16: 
+                output = numpy.ma.masked_outside(C,-4096,4096).mask
+            else:
+                output = numpy.zeros(C.shape,dtype=numpy.bool)
+                output[:] = False
         else:
-            raise ValueError("Cannot filter outliers on "
-                "input with ndim={ndim:d}>3 dimensions".format(ndim=C.ndim))
-        fracdev = ((C - med)/mad)
-        return abs(fracdev) > cutoff
+            output = numpy.zeros(C.shape,dtype=numpy.bool)
+            output[:] = False
+
+        # Now 2 sections - one for calibration data, one for other 
+        # based on Gerrit's original code
+        #
+        # Gerrit's original code to do smoothing version of outliers
+        # but first need to remove obvious bad cases (AVHRR equivalent was
+        # the gross outlier test)
+        #
+        # Only apply to calibration_data=True case on scanline to scanline
+        # basis
+        #
+        if self.calibration_data:
+            cutoff = self.cutoff
+            # JMittaz 08/07/2019
+            # Should use median of single scanline only
+            #
+            if C.ndim == 3:
+                #
+                # Note do not reshape as in Gerrit's original code
+                #
+                # Get values long axis with length 48 (number of calibration
+                # data)
+                #
+                if C.shape[0] == 48 and C.shape[1] != 48 and C.shape[2] != 48:
+                    axisval = 0
+                elif C.shape[1] == 48 and C.shape[0] != 48 and C.shape[2] != 48:
+                    axisval = 1
+                elif C.shape[2] == 48 and C.shape[0] != 48 and C.shape[1] != 48:
+                    axisval = 1
+                else:
+                    #
+                    # Can't tell so assume 'normal' (axis=1 is along scanline)
+                    #
+                    axisval = 1
+
+                #
+                # Use mean not median as median causes problems with count
+                # data
+                #
+                mean = numpy.ma.mean(C,axis=axisval)                
+                if axisval == 0:
+                    med = mean[None,:,:]                
+                elif axisval == 1:
+                    med = mean[:,None,:]                
+                elif axisval == 2:
+                    med = mean[:,:,None]                
+                madval = numpy.ma.mean(abs(C - med),axis=axisval)
+                if axisval == 0:
+                    mad = madval[None,:,:]
+                elif axisval == 1:
+                    mad = madval[:,None,:]
+                elif axisval == 2:
+                    mad = madval[:,:,None]
+                if (mad==0).any():
+                    #
+                    # Gerrit had a fallback here
+                    # This should correspond to case where there is no 
+                    # variation in the data at all so nothing to remove
+                    # So make mad large for the case where mad == 0.
+                    #
+                    gd = (mad == 0)
+                    mad[gd] = 10000.
+            elif C.ndim < 3:
+                # I don't yet know what this case is for..
+                # Looks like it happens for median checks
+                med = numpy.ma.median(C.reshape((-1,)))
+                mad = numpy.ma.median(abs(C - med).reshape((-1,)))
+                if mad==0:
+                    med = C.mean()
+                    mad = max(C.std(), self.fallback_min_std)
+            else:
+                raise ValueError("Cannot filter outliers on "
+                                 "input with ndim={ndim:d}>3 dimensions".format(ndim=C.ndim))
+            fracdev = ((C - med)/mad)
+            output = (abs(fracdev) > cutoff) | output
+        elif self.prt:
+            cutoff = self.cutoff
+            #
+            # PRT values at this point
+            # Use Gerrits original code for this case
+            #
+            if C.ndim == 3:
+                med = numpy.ma.median(
+                    C.reshape(C.shape[0]*C.shape[1], C.shape[2]),
+                    0)
+                mad = numpy.ma.median(
+                    abs(C - med).reshape(C.shape[0]*C.shape[1], C.shape[2]),
+                    0)
+                if (mad==0).any():
+                    # use fallback
+                    med[mad==0] = C[..., mad==0].reshape(C.shape[0]*C.shape[1], (mad==0).sum()).mean(0)
+                    mad[mad==0] = numpy.c_[
+                        C[..., mad==0].reshape(C.shape[0]*C.shape[1], (mad==0).sum()).std(0),
+                        numpy.tile(self.fallback_min_std, (mad==0).sum())].max(1)
+            elif C.ndim < 3:
+                med = numpy.ma.median(C.reshape((-1,)))
+                mad = numpy.ma.median(abs(C - med).reshape((-1,)))
+                if mad==0:
+                    med = C.mean()
+                    mad = max(C.std(), self.fallback_min_std)
+            else:
+                raise ValueError("Cannot filter outliers on "
+                                 "input with ndim={ndim:d}>3 dimensions".\
+                                     format(ndim=C.ndim))
+            fracdev = ((C - med)/mad)
+            output = abs(fracdev) > cutoff            
+        return output
 
 class OrbitFilter:
     """Generic, abstract class for any kind of filtering.
@@ -218,13 +340,15 @@ class HIRSFlagger(OrbitFilter):
     def finalise(self, arr):
         return arr
 
-class HIRSCalibCountFilter(OrbitFilter):
-    """Apply masking based on calibration count filter for HIRS
+class HIRSCountFilter(OrbitFilter):
+    """Apply masking based on count filter for HIRS (calib and Earth)
     """
 
-    def __init__(self, ds, filter_calibcounts:OutlierFilter):
+    def __init__(self, ds, filter_calibcounts:OutlierFilter,\
+                     filter_earthcounts:OutlierFilter):
         self.ds = ds
         self.filter_calibcounts = filter_calibcounts
+        self.filter_earthcounts = filter_earthcounts
 
     def reset(self):
         pass
@@ -238,9 +362,21 @@ class HIRSCalibCountFilter(OrbitFilter):
                 raise dataset.InvalidDataError("Out of {:d} scanlines, "
                     "found no {:s} views, cannot calibrate!".format(
                         scanlines.shape[0], v))
-            scanlines.mask["counts"][x, 8:, :] = self.ds.filter_calibcounts.filter_outliers(
-                scanlines["counts"][x, 8:, :])
-
+            # JMittaz 05/07/2019
+            # 8: is removing the first 7 entries for the calibration data
+            # which are known to be problematic
+            #
+            # Don't want to apply filter to Earth views
+            #
+            if v != 'Earth':
+                scanlines.mask["counts"][x, 8:, :] = \
+                    self.ds.filter_calibcounts.filter_outliers(\
+                    scanlines["counts"][x, 8:, :])
+            else:
+                # Full scanline for earth
+                scanlines.mask["counts"][x, :, :] = \
+                    self.ds.filter_earthcounts.filter_outliers(\
+                    scanlines["counts"][x, :, :])
 
         cc = scanlines["calcof_sorted"]
 #        scanlines = self.ds.apply_calibcount_filter(scanlines)

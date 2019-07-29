@@ -17,6 +17,7 @@ import numpy
 import scipy.stats
 import scipy.special
 
+from typhon.physics.units.tools import UnitsAwareDataArray, UnitsAwareDataArray as UADA
 
 def bin(x, y, bins):
     """Bin/bucket y according to values of x.
@@ -201,7 +202,7 @@ def get_distribution_as_percentiles(x, y,
                          for b in ybinned])
 
 
-def adev(x, dim=-1):
+def adev(x, dim=-1, outN=False):
     r"""Calculate Allan deviation in its simplest form
 
     Arguments:
@@ -214,20 +215,59 @@ def adev(x, dim=-1):
     .. math::
         \sigma = \sqrt{\frac{1}{2(N-1)} \sum_{i=1}^{N-1} (y_{i+1} - y_i)^2}
 
+        outN will output array of N used in sums
+
     Equation source: Jon Mittaz, personal communication, April 2016
     """
 
     
     if isinstance(dim, numbers.Integral):
+        #Jmittaz - need to test the missing data case
+        raise Exception("This adev code (numpy array) is not tested - please do so")
         # dimension by number, probably ndarray
         x = x.swapaxes(-1, dim)
-        N = x.shape[-1]
-        return numpy.sqrt(1/(2*(N-1)) *
-                          ((x[..., 1:] - x[..., :-1])**2).sum(-1))
+        N = diff.shape[-1]
+        old_adev = numpy.sqrt(1/(2*(N-1)) *
+                              ((x[..., 1:] - x[..., :-1])**2).sum(-1))
+        #
+        # Get N in cases where there is missing data
+        #
+        diff = (x[..., 1:] - x[..., :-1])
+        gd = numpy.isfinite(diff)
+        ndiff = numpy.zeros(diff.shape,dtype=numpy.int16)
+        ndiff[gd] = 1
+        newN = ndiff.sum(-1)
+        new_adev = numpy.sqrt(1/(2*(newN)) *
+                              ((x[..., 1:] - x[..., :-1])**2).sum(-1))
     else:
         # dimension by name, should be xarray.Dataarray
-        N = x.sizes[dim]
-        return numpy.sqrt((1/(2*(N-1)) * x.diff(dim=dim)**2).sum(dim=dim))
+#        N = x.sizes[dim]
+#        old_adev = numpy.sqrt((1/(2*(N-1)) * x.diff(dim=dim)**2).sum(dim=dim))
+        # Jmittaz - include missing data
+        #
+        # Get N in cases where there is missing data
+        #
+        diff = x.diff(dim=dim)
+        gd = numpy.isfinite(diff)
+        ndiff = numpy.zeros(diff.shape,dtype=numpy.int16)
+        diff_narray = UADA(ndiff,dims=diff.dims,coords=diff.coords,\
+                              attrs={"units": "dimensionless"})
+        diff_narray.values[gd] = 1
+        newN = diff_narray.sum(dim=dim)
+        
+        #
+        # Now have to convert newN to xarray with units
+        #
+        new_adev = numpy.sqrt((1/(2*(newN))) * \
+                                   (x.diff(dim=dim)**2).sum(dim=dim))
+
+    #
+    # Can also output N data so we can scale unceratinty correctly if needed
+    #
+    if outN:
+        return new_adev,newN
+    else:
+        return new_adev
 
 def corrcoef(mat):
     """Calculate correlation coefficient with p-values
